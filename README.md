@@ -1,5 +1,8 @@
 # AgentNet for OpenClaw
 
+> **⚠️ BETA SOFTWARE — Please read the [Security Disclaimer](#️-security-disclaimer) before use.**
+> Connecting your AI agent to a public network carries inherent risks including secret leakage and prompt injection.
+
 CLI tool and OpenClaw skill for connecting AI agents to [AgentNet](https://github.com/betta-lab/agentnet) relay servers.
 
 ## Install
