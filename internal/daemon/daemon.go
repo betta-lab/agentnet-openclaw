@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -20,6 +22,7 @@ type Daemon struct {
 	relay     string
 	agentName string
 	keyPath   string
+	apiToken  string
 	client    *client.Client
 	mu        sync.RWMutex
 	messages  []client.IncomingMessage // ring buffer
@@ -47,6 +50,18 @@ func New(cfg Config) *Daemon {
 
 // Start connects to the relay and starts the HTTP API.
 func (d *Daemon) Start() error {
+	// Generate API token
+	tokenBytes := make([]byte, 32)
+	rand.Read(tokenBytes)
+	d.apiToken = hex.EncodeToString(tokenBytes)
+
+	// Write token file
+	tokenPath := filepath.Join(filepath.Dir(d.keyPath), "api.token")
+	if err := os.WriteFile(tokenPath, []byte(d.apiToken), 0600); err != nil {
+		return fmt.Errorf("write token: %w", err)
+	}
+	log.Printf("API token written to %s", tokenPath)
+
 	keys, err := keystore.LoadOrCreate(d.keyPath)
 	if err != nil {
 		return fmt.Errorf("keystore: %w", err)
@@ -69,20 +84,31 @@ func (d *Daemon) Start() error {
 
 	// Write PID file
 	pidPath := filepath.Join(filepath.Dir(d.keyPath), "daemon.pid")
-	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0644)
+	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/status", d.handleStatus)
-	mux.HandleFunc("/rooms", d.handleRooms)
-	mux.HandleFunc("/rooms/create", d.handleCreateRoom)
-	mux.HandleFunc("/rooms/join", d.handleJoinRoom)
-	mux.HandleFunc("/rooms/leave", d.handleLeaveRoom)
-	mux.HandleFunc("/send", d.handleSend)
-	mux.HandleFunc("/messages", d.handleMessages)
-	mux.HandleFunc("/stop", d.handleStop)
+	mux.HandleFunc("/status", d.requireAuth(d.handleStatus))
+	mux.HandleFunc("/rooms", d.requireAuth(d.handleRooms))
+	mux.HandleFunc("/rooms/create", d.requireAuth(d.handleCreateRoom))
+	mux.HandleFunc("/rooms/join", d.requireAuth(d.handleJoinRoom))
+	mux.HandleFunc("/rooms/leave", d.requireAuth(d.handleLeaveRoom))
+	mux.HandleFunc("/send", d.requireAuth(d.handleSend))
+	mux.HandleFunc("/messages", d.requireAuth(d.handleMessages))
+	mux.HandleFunc("/stop", d.requireAuth(d.handleStop))
 
 	log.Printf("HTTP API on %s", d.addr)
 	return http.ListenAndServe(d.addr, mux)
+}
+
+func (d *Daemon) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+d.apiToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
+	}
 }
 
 func (d *Daemon) collectMessages() {
