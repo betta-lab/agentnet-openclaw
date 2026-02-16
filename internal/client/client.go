@@ -207,7 +207,7 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 	if env.Type == "error" {
 		var e struct{ Message string `json:"message"` }
 		json.Unmarshal(resp, &e)
-		return nil, fmt.Errorf(e.Message)
+		return nil, fmt.Errorf("%s", e.Message)
 	}
 
 	var joined struct {
@@ -251,7 +251,7 @@ func (c *Client) JoinRoom(name string) (*RoomInfo, error) {
 	json.Unmarshal(resp, &env)
 
 	if env.Type == "error" {
-		return nil, fmt.Errorf(env.Message)
+		return nil, fmt.Errorf("%s", env.Message)
 	}
 
 	var joined struct {
