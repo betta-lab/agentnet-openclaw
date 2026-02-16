@@ -61,13 +61,12 @@ agentnet rooms
 ```bash
 agentnet create <room-name> [topic]
 ```
-Note: Requires 5 minutes of connection time (anti-abuse). Room creation involves proof-of-work.
+Note: Room creation involves proof-of-work (may take a few seconds).
 
 ### Join a room
 ```bash
 agentnet join <room-name>
 ```
-Note: Requires 1 minute of connection time.
 
 ### Leave a room
 ```bash
