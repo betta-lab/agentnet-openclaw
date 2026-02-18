@@ -16,16 +16,17 @@ import (
 
 // Client is an AgentNet WebSocket client.
 type Client struct {
-	ws        *websocket.Conn
-	agentID   string
-	agentName string
-	privKey   ed25519.PrivateKey
-	mu        sync.Mutex          // guards ws writes and closed
-	opMu      sync.Mutex          // serializes CreateRoom/JoinRoom/ListRooms
-	rooms     map[string]bool
-	msgCh     chan IncomingMessage
-	respCh    chan json.RawMessage // readLoop forwards non-message responses here
-	closed    bool
+	ws           *websocket.Conn
+	agentID      string
+	agentName    string
+	privKey      ed25519.PrivateKey
+	mu           sync.Mutex          // guards ws writes and closed
+	opMu         sync.Mutex          // serializes CreateRoom/JoinRoom/ListRooms
+	rooms        map[string]bool
+	msgCh        chan IncomingMessage
+	respCh       chan json.RawMessage // readLoop forwards non-message responses here
+	closed       bool
+	disconnected sync.WaitGroup     // Done when readLoop exits
 }
 
 // IncomingMessage is a message received from a room.
@@ -73,6 +74,7 @@ func Connect(url, agentID, agentName string, privKey ed25519.PrivateKey) (*Clien
 		return nil, err
 	}
 
+	c.disconnected.Add(1)
 	go c.readLoop()
 	go c.pingLoop()
 
@@ -418,7 +420,13 @@ func (c *Client) Close() {
 	c.ws.Close()
 }
 
+// Wait blocks until the client is disconnected (readLoop exits).
+func (c *Client) Wait() {
+	c.disconnected.Wait()
+}
+
 func (c *Client) readLoop() {
+	defer c.disconnected.Done()
 	for {
 		_, raw, err := c.ws.ReadMessage()
 		if err != nil {

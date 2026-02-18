@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/betta-lab/agentnet-openclaw/internal/client"
 	"github.com/betta-lab/agentnet-openclaw/internal/keystore"
@@ -18,14 +19,16 @@ import (
 
 // Daemon manages an AgentNet connection and exposes a local HTTP API.
 type Daemon struct {
-	addr      string
-	relay     string
-	agentName string
-	keyPath   string
-	apiToken  string
-	client    *client.Client
-	mu        sync.RWMutex
-	messages  []client.IncomingMessage // ring buffer
+	addr        string
+	relay       string
+	agentName   string
+	keyPath     string
+	apiToken    string
+	client      *client.Client
+	mu          sync.RWMutex
+	messages    []client.IncomingMessage // ring buffer
+	joinedRooms map[string]bool          // rooms to rejoin on reconnect
+	keys        *keystore.Keys
 }
 
 // Config holds daemon configuration.
@@ -40,11 +43,12 @@ type Config struct {
 func New(cfg Config) *Daemon {
 	keyPath := filepath.Join(cfg.DataDir, "agent.key")
 	return &Daemon{
-		addr:      cfg.ListenAddr,
-		relay:     cfg.RelayURL,
-		agentName: cfg.AgentName,
-		keyPath:   keyPath,
-		messages:  make([]client.IncomingMessage, 0, 1000),
+		addr:        cfg.ListenAddr,
+		relay:       cfg.RelayURL,
+		agentName:   cfg.AgentName,
+		keyPath:     keyPath,
+		messages:    make([]client.IncomingMessage, 0, 1000),
+		joinedRooms: make(map[string]bool),
 	}
 }
 
@@ -80,17 +84,15 @@ func (d *Daemon) Start() error {
 	log.Printf("agent name: %s", d.agentName)
 	log.Printf("connecting to relay: %s", d.relay)
 
-	c, err := client.Connect(d.relay, keys.AgentID(), d.agentName, keys.PrivateKey)
-	if err != nil {
+	d.keys = keys
+
+	// Initial connect
+	if err := d.connectAndRejoin(); err != nil {
 		return fmt.Errorf("connect: %w", err)
 	}
 
-	d.mu.Lock()
-	d.client = c
-	d.mu.Unlock()
-
-	// Collect incoming messages
-	go d.collectMessages()
+	// Reconnect loop — watches for disconnection and reconnects with backoff
+	go d.reconnectLoop()
 
 	// Write PID file
 	pidPath := filepath.Join(filepath.Dir(d.keyPath), "daemon.pid")
@@ -121,8 +123,72 @@ func (d *Daemon) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (d *Daemon) collectMessages() {
-	for msg := range d.client.Messages() {
+// connectAndRejoin connects to the relay and rejoins previously joined rooms.
+func (d *Daemon) connectAndRejoin() error {
+	c, err := client.Connect(d.relay, d.keys.AgentID(), d.agentName, d.keys.PrivateKey)
+	if err != nil {
+		return err
+	}
+
+	d.mu.Lock()
+	d.client = c
+	rooms := make([]string, 0, len(d.joinedRooms))
+	for room := range d.joinedRooms {
+		rooms = append(rooms, room)
+	}
+	d.mu.Unlock()
+
+	// Re-join rooms from previous session
+	for _, room := range rooms {
+		if _, err := c.JoinRoom(room); err != nil {
+			log.Printf("rejoin %s: %v", room, err)
+		} else {
+			log.Printf("rejoined room: %s", room)
+		}
+	}
+
+	go d.collectMessages(c)
+	return nil
+}
+
+// reconnectLoop watches for disconnection and reconnects with exponential backoff.
+func (d *Daemon) reconnectLoop() {
+	for {
+		d.mu.RLock()
+		c := d.client
+		d.mu.RUnlock()
+
+		// Wait until client disconnects
+		if c != nil {
+			c.Wait()
+		}
+
+		d.mu.Lock()
+		d.client = nil
+		d.mu.Unlock()
+
+		log.Printf("relay disconnected, reconnecting...")
+
+		// Exponential backoff: 2s, 4s, 8s, ... up to 60s
+		backoff := 2 * time.Second
+		for {
+			time.Sleep(backoff)
+			log.Printf("attempting reconnect to %s...", d.relay)
+			if err := d.connectAndRejoin(); err != nil {
+				log.Printf("reconnect failed: %v", err)
+				if backoff < 60*time.Second {
+					backoff *= 2
+				}
+				continue
+			}
+			log.Printf("reconnected successfully")
+			break
+		}
+	}
+}
+
+func (d *Daemon) collectMessages(c *client.Client) {
+	for msg := range c.Messages() {
 		d.mu.Lock()
 		if len(d.messages) >= 1000 {
 			d.messages = d.messages[1:]
@@ -190,6 +256,9 @@ func (d *Daemon) handleCreateRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	d.mu.Lock()
+	d.joinedRooms[req.Room] = true
+	d.mu.Unlock()
 	json.NewEncoder(w).Encode(info)
 }
 
@@ -220,6 +289,9 @@ func (d *Daemon) handleJoinRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	d.mu.Lock()
+	d.joinedRooms[req.Room] = true
+	d.mu.Unlock()
 	json.NewEncoder(w).Encode(info)
 }
 
@@ -246,6 +318,9 @@ func (d *Daemon) handleLeaveRoom(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	d.mu.Lock()
+	delete(d.joinedRooms, req.Room)
+	d.mu.Unlock()
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
