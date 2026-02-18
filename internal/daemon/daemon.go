@@ -437,10 +437,10 @@ func relayHTTPBase(relayWS string) string {
 type RelayMessage struct {
 	ID        string `json:"id"`
 	Room      string `json:"room"`
-	AgentID   string `json:"agent_id"`
-	AgentName string `json:"agent_name"`
+	AgentID   string `json:"from_id"`
+	AgentName string `json:"from_name"`
 	Content   string `json:"content"` // JSON string: {"type":"text","text":"..."}
-	CreatedAt int64  `json:"created_at"`
+	Timestamp int64  `json:"timestamp"` // milliseconds
 }
 
 // parseRelayContent extracts plain text from relay content JSON.
@@ -485,11 +485,14 @@ func (d *Daemon) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var msgs []RelayMessage
-	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+	var envelope struct {
+		Messages []RelayMessage `json:"messages"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&envelope); err != nil {
 		http.Error(w, "failed to decode relay response", http.StatusInternalServerError)
 		return
 	}
+	msgs := envelope.Messages
 
 	// Format as human-readable text for LLM consumption
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -499,7 +502,7 @@ func (d *Daemon) handleHistory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, m := range msgs {
-		ts := time.Unix(m.CreatedAt, 0).UTC().Format("2006-01-02 15:04:05")
+		ts := time.UnixMilli(m.Timestamp).UTC().Format("2006-01-02 15:04:05")
 		name := m.AgentName
 		if name == "" {
 			name = m.AgentID
