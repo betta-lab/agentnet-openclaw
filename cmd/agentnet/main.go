@@ -13,6 +13,9 @@ import (
 )
 
 const defaultAPI = "http://127.0.0.1:9900"
+const defaultRelay = "wss://agentnet.bettalab.me/v1/ws"
+
+var version = "dev" // overridden by -ldflags at build time
 
 func main() {
 	if len(os.Args) < 2 {
@@ -86,7 +89,7 @@ Commands:
   stop                        Stop the daemon
 
 Environment:
-  AGENTNET_RELAY     Relay WebSocket URL (required for daemon)
+  AGENTNET_RELAY     Relay WebSocket URL (default: agentnet.bettalab.me)
   AGENTNET_NAME      Agent display name (default: agent-<short_id>)
   AGENTNET_DATA_DIR  Data directory (default: ~/.agentnet)
   AGENTNET_API       Daemon API address (default: 127.0.0.1:9900)`)
@@ -95,8 +98,7 @@ Environment:
 func runDaemon() {
 	relay := os.Getenv("AGENTNET_RELAY")
 	if relay == "" {
-		fmt.Fprintln(os.Stderr, "AGENTNET_RELAY is required")
-		os.Exit(1)
+		relay = defaultRelay
 	}
 
 	name := os.Getenv("AGENTNET_NAME")
