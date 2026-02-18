@@ -20,9 +20,11 @@ type Client struct {
 	agentID   string
 	agentName string
 	privKey   ed25519.PrivateKey
-	mu        sync.Mutex
+	mu        sync.Mutex          // guards ws writes and closed
+	opMu      sync.Mutex          // serializes CreateRoom/JoinRoom/ListRooms
 	rooms     map[string]bool
 	msgCh     chan IncomingMessage
+	respCh    chan json.RawMessage // readLoop forwards non-message responses here
 	closed    bool
 }
 
@@ -63,6 +65,7 @@ func Connect(url, agentID, agentName string, privKey ed25519.PrivateKey) (*Clien
 		privKey:   privKey,
 		rooms:     make(map[string]bool),
 		msgCh:     make(chan IncomingMessage, 1000),
+		respCh:    make(chan json.RawMessage, 4),
 	}
 
 	if err := c.handshake(); err != nil {
@@ -94,7 +97,7 @@ func (c *Client) handshake() error {
 		return fmt.Errorf("send hello: %w", err)
 	}
 
-	// Read pow.challenge
+	// Read pow.challenge — handshake happens before readLoop starts, so direct read is safe.
 	var challenge struct {
 		Type       string `json:"type"`
 		Challenge  string `json:"challenge"`
@@ -148,8 +151,22 @@ func (c *Client) handshake() error {
 	return nil
 }
 
+// recvResponse waits for a response from readLoop (for synchronous operations).
+// Must only be called while opMu is held.
+func (c *Client) recvResponse() (json.RawMessage, error) {
+	select {
+	case resp := <-c.respCh:
+		return resp, nil
+	case <-time.After(15 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for relay response")
+	}
+}
+
 // CreateRoom creates a new room (handles PoW challenge).
 func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	// Send without PoW first
 	msg := map[string]interface{}{
 		"type":      "room.create",
@@ -165,9 +182,9 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 		return nil, err
 	}
 
-	// Expect pow.challenge
-	var resp json.RawMessage
-	if err := c.ws.ReadJSON(&resp); err != nil {
+	// Expect pow.challenge (via readLoop → respCh)
+	resp, err := c.recvResponse()
+	if err != nil {
 		return nil, err
 	}
 
@@ -198,7 +215,8 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 			return nil, err
 		}
 
-		if err := c.ws.ReadJSON(&resp); err != nil {
+		resp, err = c.recvResponse()
+		if err != nil {
 			return nil, err
 		}
 		json.Unmarshal(resp, &env)
@@ -227,6 +245,9 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 
 // JoinRoom joins an existing room.
 func (c *Client) JoinRoom(name string) (*RoomInfo, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	msg := map[string]interface{}{
 		"type":      "room.join",
 		"room":      name,
@@ -239,8 +260,8 @@ func (c *Client) JoinRoom(name string) (*RoomInfo, error) {
 		return nil, err
 	}
 
-	var resp json.RawMessage
-	if err := c.ws.ReadJSON(&resp); err != nil {
+	resp, err := c.recvResponse()
+	if err != nil {
 		return nil, err
 	}
 
@@ -306,6 +327,9 @@ func (c *Client) SendMessage(room, text string) error {
 
 // ListRooms requests a room list.
 func (c *Client) ListRooms(tags []string, limit int) ([]RoomListItem, error) {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	msg := map[string]interface{}{
 		"type":  "rooms.list",
 		"limit": limit,
@@ -317,8 +341,8 @@ func (c *Client) ListRooms(tags []string, limit int) ([]RoomListItem, error) {
 		return nil, err
 	}
 
-	var resp json.RawMessage
-	if err := c.ws.ReadJSON(&resp); err != nil {
+	resp, err := c.recvResponse()
+	if err != nil {
 		return nil, err
 	}
 
@@ -368,6 +392,7 @@ func (c *Client) readLoop() {
 			var msg struct {
 				Room    string `json:"room"`
 				From    string `json:"from"`
+				FromName string `json:"from_name,omitempty"`
 				Content struct {
 					Text string `json:"text"`
 				} `json:"content"`
@@ -377,11 +402,19 @@ func (c *Client) readLoop() {
 			c.msgCh <- IncomingMessage{
 				Room:      msg.Room,
 				From:      msg.From,
+				FromName:  msg.FromName,
 				Text:      msg.Content.Text,
 				Timestamp: msg.Timestamp,
 			}
 		case "pong":
 			// ignore
+		default:
+			// Forward control/response messages to waiting synchronous operations.
+			select {
+			case c.respCh <- json.RawMessage(raw):
+			default:
+				// respCh full or nobody waiting — drop
+			}
 		}
 	}
 }
@@ -465,7 +498,6 @@ func randomUUID() string {
 }
 
 func solvePoW(challenge string, difficulty int) string {
-	// Import from shared code would be ideal, but inline for now
 	var nonce uint64
 	for {
 		proof := fmt.Sprintf("%d", nonce)
