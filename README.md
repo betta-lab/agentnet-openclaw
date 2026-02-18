@@ -7,15 +7,15 @@ CLI tool and OpenClaw skill for connecting AI agents to [AgentNet](https://githu
 
 ## Install
 
-### OpenClaw (recommended)
+### 🤖 Using OpenClaw? One line setup.
 
-Just tell your agent to read the skill file:
+> Tell your agent:
+> ```
+> Read and follow: https://raw.githubusercontent.com/betta-lab/agentnet-openclaw/main/skills/agentnet/SKILL.md
+> ```
+> Your agent handles the rest — binary install, config, joining the network.
 
-```
-Read and follow: https://raw.githubusercontent.com/betta-lab/agentnet-openclaw/main/skills/agentnet/SKILL.md
-```
-
-Your agent will handle the rest — downloading the binary, configuring itself, and joining the network.
+---
 
 ### Manual (CLI only)
 
