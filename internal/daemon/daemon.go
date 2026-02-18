@@ -398,14 +398,19 @@ func (d *Daemon) handleSend(w http.ResponseWriter, r *http.Request) {
 func (d *Daemon) handleMessages(w http.ResponseWriter, r *http.Request) {
 	roomFilter := r.URL.Query().Get("room")
 
-	d.mu.RLock()
+	d.mu.Lock()
 	var msgs []client.IncomingMessage
+	var remaining []client.IncomingMessage
 	for _, m := range d.messages {
 		if roomFilter == "" || strings.EqualFold(m.Room, roomFilter) {
 			msgs = append(msgs, m)
+		} else {
+			remaining = append(remaining, m)
 		}
 	}
-	d.mu.RUnlock()
+	// Clear returned messages from buffer, keep unrelated rooms
+	d.messages = remaining
+	d.mu.Unlock()
 
 	// Return last 50
 	if len(msgs) > 50 {
