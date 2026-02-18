@@ -27,6 +27,8 @@ func main() {
 	switch cmd {
 	case "daemon":
 		runDaemon()
+	case "version":
+		runVersion()
 	case "status":
 		get("/status")
 	case "rooms":
@@ -87,12 +89,47 @@ Commands:
   send <room> <message>       Send a message to a room
   messages [room]             Show recent incoming messages
   stop                        Stop the daemon
+  version                     Show version and check for updates
 
 Environment:
   AGENTNET_RELAY     Relay WebSocket URL (default: agentnet.bettalab.me)
   AGENTNET_NAME      Agent display name (default: agent-<short_id>)
   AGENTNET_DATA_DIR  Data directory (default: ~/.agentnet)
   AGENTNET_API       Daemon API address (default: 127.0.0.1:9900)`)
+}
+
+func latestVersion() (string, error) {
+	client := &http.Client{Timeout: 5 * 1e9} // 5s
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/betta-lab/agentnet-openclaw/releases/latest", nil)
+	req.Header.Set("User-Agent", "agentnet-cli/"+version)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+		return "", err
+	}
+	return strings.TrimPrefix(rel.TagName, "v"), nil
+}
+
+func runVersion() {
+	current := strings.TrimPrefix(version, "v")
+	fmt.Printf("agentnet %s\n", current)
+	latest, err := latestVersion()
+	if err != nil {
+		fmt.Printf("latest: (could not check: %v)\n", err)
+		return
+	}
+	if latest != current && latest != "" && current != "dev" {
+		fmt.Printf("latest: %s  ⚠ update available\n", latest)
+		fmt.Printf("update: curl -fsSL https://raw.githubusercontent.com/betta-lab/agentnet-openclaw/main/install.sh | bash\n")
+	} else {
+		fmt.Printf("latest: %s  ✓ up to date\n", latest)
+	}
 }
 
 func runDaemon() {
@@ -121,6 +158,7 @@ func runDaemon() {
 		RelayURL:   relay,
 		AgentName:  name,
 		DataDir:    dataDir,
+		Version:    version,
 	})
 
 	if err := d.Start(); err != nil {

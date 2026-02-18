@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -19,16 +20,18 @@ import (
 
 // Daemon manages an AgentNet connection and exposes a local HTTP API.
 type Daemon struct {
-	addr        string
-	relay       string
-	agentName   string
-	keyPath     string
-	apiToken    string
-	client      *client.Client
-	mu          sync.RWMutex
-	messages    []client.IncomingMessage // ring buffer
-	joinedRooms map[string]bool          // rooms to rejoin on reconnect
-	keys        *keystore.Keys
+	addr           string
+	relay          string
+	agentName      string
+	keyPath        string
+	apiToken       string
+	client         *client.Client
+	mu             sync.RWMutex
+	messages       []client.IncomingMessage // ring buffer
+	joinedRooms    map[string]bool          // rooms to rejoin on reconnect
+	keys           *keystore.Keys
+	version        string
+	latestVersion  string // fetched async on startup
 }
 
 // Config holds daemon configuration.
@@ -37,6 +40,7 @@ type Config struct {
 	RelayURL   string // e.g. "wss://relay.example.com/v1/ws"
 	AgentName  string
 	DataDir    string // for key storage
+	Version    string // current binary version
 }
 
 // New creates a daemon (does not start it).
@@ -49,6 +53,7 @@ func New(cfg Config) *Daemon {
 		keyPath:     keyPath,
 		messages:    make([]client.IncomingMessage, 0, 1000),
 		joinedRooms: make(map[string]bool),
+		version:     cfg.Version,
 	}
 }
 
@@ -94,6 +99,9 @@ func (d *Daemon) Start() error {
 	// Reconnect loop — watches for disconnection and reconnects with backoff
 	go d.reconnectLoop()
 
+	// Check for updates in background (non-blocking)
+	go d.checkLatestVersion()
+
 	// Write PID file
 	pidPath := filepath.Join(filepath.Dir(d.keyPath), "daemon.pid")
 	os.WriteFile(pidPath, []byte(fmt.Sprintf("%d", os.Getpid())), 0600)
@@ -120,6 +128,31 @@ func (d *Daemon) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// checkLatestVersion fetches the latest release from GitHub and caches it.
+func (d *Daemon) checkLatestVersion() {
+	c := &http.Client{Timeout: 10 * time.Second}
+	req, _ := http.NewRequest("GET", "https://api.github.com/repos/betta-lab/agentnet-openclaw/releases/latest", nil)
+	req.Header.Set("User-Agent", "agentnet-daemon/"+d.version)
+	resp, err := c.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	var rel struct {
+		TagName string `json:"tag_name"`
+	}
+	if err := json.Unmarshal(func() []byte { b, _ := io.ReadAll(resp.Body); return b }(), &rel); err != nil {
+		return
+	}
+	latest := strings.TrimPrefix(rel.TagName, "v")
+	d.mu.Lock()
+	d.latestVersion = latest
+	d.mu.Unlock()
+	if latest != "" && latest != strings.TrimPrefix(d.version, "v") && d.version != "dev" {
+		log.Printf("⚠ update available: %s → %s (run: agentnet version)", d.version, latest)
 	}
 }
 
@@ -201,12 +234,19 @@ func (d *Daemon) collectMessages(c *client.Client) {
 func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	connected := d.client != nil
+	latest := d.latestVersion
 	d.mu.RUnlock()
 
+	current := strings.TrimPrefix(d.version, "v")
+	updateAvailable := latest != "" && latest != current && d.version != "dev"
+
 	json.NewEncoder(w).Encode(map[string]interface{}{
-		"connected":  connected,
-		"relay":      d.relay,
-		"agent_name": d.agentName,
+		"connected":        connected,
+		"relay":            d.relay,
+		"agent_name":       d.agentName,
+		"version":          d.version,
+		"latest_version":   latest,
+		"update_available": updateAvailable,
 	})
 }
 
