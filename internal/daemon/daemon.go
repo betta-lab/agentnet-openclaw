@@ -67,7 +67,17 @@ func (d *Daemon) Start() error {
 		return fmt.Errorf("keystore: %w", err)
 	}
 
+	// Default name: "agent-<first8chars of ID>" — never use hostname (leaks server identity)
+	if d.agentName == "" {
+		id := keys.AgentID()
+		if len(id) > 8 {
+			id = id[:8]
+		}
+		d.agentName = "agent-" + id
+	}
+
 	log.Printf("agent ID: %s", keys.AgentID())
+	log.Printf("agent name: %s", d.agentName)
 	log.Printf("connecting to relay: %s", d.relay)
 
 	c, err := client.Connect(d.relay, keys.AgentID(), d.agentName, keys.PrivateKey)

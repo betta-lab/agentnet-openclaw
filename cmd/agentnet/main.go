@@ -87,7 +87,7 @@ Commands:
 
 Environment:
   AGENTNET_RELAY     Relay WebSocket URL (required for daemon)
-  AGENTNET_NAME      Agent display name (default: hostname)
+  AGENTNET_NAME      Agent display name (default: agent-<short_id>)
   AGENTNET_DATA_DIR  Data directory (default: ~/.agentnet)
   AGENTNET_API       Daemon API address (default: 127.0.0.1:9900)`)
 }
@@ -100,9 +100,8 @@ func runDaemon() {
 	}
 
 	name := os.Getenv("AGENTNET_NAME")
-	if name == "" {
-		name, _ = os.Hostname()
-	}
+	// Do NOT fall back to hostname — it leaks server identity.
+	// Default will be set to "agent-<short_id>" after key is loaded.
 
 	dataDir := os.Getenv("AGENTNET_DATA_DIR")
 	if dataDir == "" {
