@@ -151,14 +151,57 @@ func (c *Client) handshake() error {
 	return nil
 }
 
-// recvResponse waits for a response from readLoop (for synchronous operations).
+// recvTyped waits for a response matching wantTypes (and optionally wantRoom for room.joined).
+// Non-matching messages are re-queued so they aren't lost.
 // Must only be called while opMu is held.
-func (c *Client) recvResponse() (json.RawMessage, error) {
-	select {
-	case resp := <-c.respCh:
-		return resp, nil
-	case <-time.After(15 * time.Second):
-		return nil, fmt.Errorf("timeout waiting for relay response")
+func (c *Client) recvTyped(wantRoom string, wantTypes ...string) (json.RawMessage, error) {
+	deadline := time.After(15 * time.Second)
+	var queued []json.RawMessage
+
+	defer func() {
+		// re-queue unmatched messages so later calls can pick them up
+		go func() {
+			for _, q := range queued {
+				select {
+				case c.respCh <- q:
+				default:
+				}
+			}
+		}()
+	}()
+
+	for {
+		select {
+		case resp := <-c.respCh:
+			var env struct {
+				Type string `json:"type"`
+				Room string `json:"room"`
+			}
+			json.Unmarshal(resp, &env)
+
+			typeMatch := false
+			for _, t := range wantTypes {
+				if env.Type == t {
+					typeMatch = true
+					break
+				}
+			}
+			if !typeMatch {
+				queued = append(queued, resp)
+				continue
+			}
+
+			// For room.joined, also match on room name to avoid stale join events
+			if wantRoom != "" && env.Type == "room.joined" && env.Room != wantRoom {
+				queued = append(queued, resp)
+				continue
+			}
+
+			return resp, nil
+
+		case <-deadline:
+			return nil, fmt.Errorf("timeout waiting for relay response")
+		}
 	}
 }
 
@@ -182,8 +225,8 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 		return nil, err
 	}
 
-	// Expect pow.challenge (via readLoop → respCh)
-	resp, err := c.recvResponse()
+	// Expect pow.challenge or room.joined/error
+	resp, err := c.recvTyped(name, "pow.challenge", "room.joined", "error")
 	if err != nil {
 		return nil, err
 	}
@@ -215,7 +258,7 @@ func (c *Client) CreateRoom(name, topic string, tags []string) (*RoomInfo, error
 			return nil, err
 		}
 
-		resp, err = c.recvResponse()
+		resp, err = c.recvTyped(name, "room.joined", "error")
 		if err != nil {
 			return nil, err
 		}
@@ -260,7 +303,7 @@ func (c *Client) JoinRoom(name string) (*RoomInfo, error) {
 		return nil, err
 	}
 
-	resp, err := c.recvResponse()
+	resp, err := c.recvTyped(name, "room.joined", "error")
 	if err != nil {
 		return nil, err
 	}
@@ -341,7 +384,7 @@ func (c *Client) ListRooms(tags []string, limit int) ([]RoomListItem, error) {
 		return nil, err
 	}
 
-	resp, err := c.recvResponse()
+	resp, err := c.recvTyped("", "rooms.list.result", "error")
 	if err != nil {
 		return nil, err
 	}
@@ -408,6 +451,8 @@ func (c *Client) readLoop() {
 			}
 		case "pong":
 			// ignore
+		case "room.member_joined", "room.member_left":
+			// broadcast events — not command responses, discard
 		default:
 			// Forward control/response messages to waiting synchronous operations.
 			select {
