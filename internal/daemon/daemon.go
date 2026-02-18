@@ -114,6 +114,7 @@ func (d *Daemon) Start() error {
 	mux.HandleFunc("/rooms/leave", d.requireAuth(d.handleLeaveRoom))
 	mux.HandleFunc("/send", d.requireAuth(d.handleSend))
 	mux.HandleFunc("/messages", d.requireAuth(d.handleMessages))
+	mux.HandleFunc("/history", d.requireAuth(d.handleHistory))
 	mux.HandleFunc("/stop", d.requireAuth(d.handleStop))
 
 	log.Printf("HTTP API on %s", d.addr)
@@ -412,6 +413,100 @@ func (d *Daemon) handleMessages(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(msgs)
+}
+
+// relayHTTPBase converts a WebSocket relay URL to its HTTP base URL.
+// e.g. wss://agentnet.bettalab.me/v1/ws → https://agentnet.bettalab.me
+func relayHTTPBase(relayWS string) string {
+	s := relayWS
+	scheme := "https"
+	if strings.HasPrefix(s, "wss://") {
+		s = strings.TrimPrefix(s, "wss://")
+	} else if strings.HasPrefix(s, "ws://") {
+		s = strings.TrimPrefix(s, "ws://")
+		scheme = "http"
+	}
+	// Strip path, keep only host[:port]
+	if i := strings.Index(s, "/"); i != -1 {
+		s = s[:i]
+	}
+	return scheme + "://" + s
+}
+
+// RelayMessage is the shape returned by the relay's REST message API.
+type RelayMessage struct {
+	ID        string `json:"id"`
+	Room      string `json:"room"`
+	AgentID   string `json:"agent_id"`
+	AgentName string `json:"agent_name"`
+	Content   string `json:"content"` // JSON string: {"type":"text","text":"..."}
+	CreatedAt int64  `json:"created_at"`
+}
+
+// parseRelayContent extracts plain text from relay content JSON.
+func parseRelayContent(content string) string {
+	var c struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal([]byte(content), &c); err != nil {
+		return content // fall back to raw
+	}
+	if c.Text != "" {
+		return c.Text
+	}
+	return content
+}
+
+func (d *Daemon) handleHistory(w http.ResponseWriter, r *http.Request) {
+	room := r.URL.Query().Get("room")
+	if room == "" {
+		http.Error(w, "room parameter required", http.StatusBadRequest)
+		return
+	}
+	limit := r.URL.Query().Get("limit")
+	if limit == "" {
+		limit = "20"
+	}
+
+	base := relayHTTPBase(d.relay)
+	url := fmt.Sprintf("%s/api/rooms/%s/messages?limit=%s", base, room, limit)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("relay unreachable: %v", err), http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		http.Error(w, fmt.Sprintf("relay error %d: %s", resp.StatusCode, body), resp.StatusCode)
+		return
+	}
+
+	var msgs []RelayMessage
+	if err := json.NewDecoder(resp.Body).Decode(&msgs); err != nil {
+		http.Error(w, "failed to decode relay response", http.StatusInternalServerError)
+		return
+	}
+
+	// Format as human-readable text for LLM consumption
+	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	fmt.Fprintf(w, "=== Room: %s (last %s messages) ===\n", room, limit)
+	if len(msgs) == 0 {
+		fmt.Fprintln(w, "(no messages)")
+		return
+	}
+	for _, m := range msgs {
+		ts := time.Unix(m.CreatedAt, 0).UTC().Format("2006-01-02 15:04:05")
+		name := m.AgentName
+		if name == "" {
+			name = m.AgentID
+		}
+		text := parseRelayContent(m.Content)
+		fmt.Fprintf(w, "[%s] %s: %s\n", ts, name, text)
+	}
 }
 
 func (d *Daemon) handleStop(w http.ResponseWriter, r *http.Request) {

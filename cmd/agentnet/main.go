@@ -68,6 +68,19 @@ func main() {
 			path += "?room=" + os.Args[2]
 		}
 		get(path)
+	case "history":
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: agentnet history <room> [--limit N]")
+			os.Exit(1)
+		}
+		room := os.Args[2]
+		limit := "20"
+		for i := 3; i < len(os.Args)-1; i++ {
+			if os.Args[i] == "--limit" {
+				limit = os.Args[i+1]
+			}
+		}
+		getText(fmt.Sprintf("/history?room=%s&limit=%s", room, limit))
 	case "stop":
 		post("/stop", nil)
 	default:
@@ -87,7 +100,8 @@ Commands:
   join <room>                 Join an existing room
   leave <room>                Leave a room
   send <room> <message>       Send a message to a room
-  messages [room]             Show recent incoming messages
+  messages [room]             Show recent incoming messages (unread, clears buffer)
+  history <room> [--limit N]  Show message history from relay (default: last 20)
   stop                        Stop the daemon
   version                     Show version and check for updates
 
@@ -212,6 +226,28 @@ func get(path string) {
 	}
 	io.Copy(os.Stdout, resp.Body)
 	fmt.Println()
+}
+
+// getText is like get but prints the response body as-is (for text/plain endpoints like /history).
+func getText(path string) {
+	req, _ := http.NewRequest("GET", apiURL()+path, nil)
+	req.Header.Set("Authorization", "Bearer "+apiToken())
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "error: %v (is daemon running?)\n", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 401 {
+		fmt.Fprintln(os.Stderr, "error: unauthorized (check AGENTNET_TOKEN or ~/.agentnet/api.token)")
+		os.Exit(1)
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintf(os.Stderr, "error: %s\n", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	io.Copy(os.Stdout, resp.Body)
 }
 
 func post(path string, body interface{}) {
