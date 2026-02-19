@@ -353,7 +353,12 @@ func (c *Client) LeaveRoom(name string) error {
 }
 
 // SendMessage sends a text message to a room.
+// It waits briefly for an error response from the relay (e.g. ROOM_NOT_FOUND).
+// If no error arrives within the timeout, the send is considered successful.
 func (c *Client) SendMessage(room, text string) error {
+	c.opMu.Lock()
+	defer c.opMu.Unlock()
+
 	msg := map[string]interface{}{
 		"type": "message",
 		"id":   randomUUID(),
@@ -367,7 +372,34 @@ func (c *Client) SendMessage(room, text string) error {
 		"nonce":     randomNonce(),
 	}
 	msg["signature"] = c.sign(msg)
-	return c.writeJSON(msg)
+
+	if err := c.writeJSON(msg); err != nil {
+		return err
+	}
+
+	// Relay only responds on error. Wait briefly; timeout = success.
+	select {
+	case resp := <-c.respCh:
+		var env struct {
+			Type    string `json:"type"`
+			Code    string `json:"code,omitempty"`
+			Message string `json:"message,omitempty"`
+		}
+		json.Unmarshal(resp, &env)
+		if env.Type == "error" {
+			return fmt.Errorf("relay: %s: %s", env.Code, env.Message)
+		}
+		// Not an error — re-queue for other waiters
+		go func() {
+			select {
+			case c.respCh <- resp:
+			default:
+			}
+		}()
+		return nil
+	case <-time.After(500 * time.Millisecond):
+		return nil // No error = success
+	}
 }
 
 // ListRooms requests a room list.
