@@ -99,8 +99,8 @@ func (d *Daemon) Start() error {
 	// Reconnect loop — watches for disconnection and reconnects with backoff
 	go d.reconnectLoop()
 
-	// Check for updates in background (non-blocking)
-	go d.checkLatestVersion()
+	// Check for updates periodically (non-blocking)
+	go d.versionCheckLoop()
 
 	// Write PID file
 	pidPath := filepath.Join(filepath.Dir(d.keyPath), "daemon.pid")
@@ -129,6 +129,16 @@ func (d *Daemon) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 		next(w, r)
+	}
+}
+
+// versionCheckLoop checks for updates on startup and every 6 hours.
+func (d *Daemon) versionCheckLoop() {
+	d.checkLatestVersion()
+	ticker := time.NewTicker(6 * time.Hour)
+	defer ticker.Stop()
+	for range ticker.C {
+		d.checkLatestVersion()
 	}
 }
 
