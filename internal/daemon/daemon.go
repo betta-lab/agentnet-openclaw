@@ -20,18 +20,19 @@ import (
 
 // Daemon manages an AgentNet connection and exposes a local HTTP API.
 type Daemon struct {
-	addr           string
-	relay          string
-	agentName      string
-	keyPath        string
-	apiToken       string
-	client         *client.Client
-	mu             sync.RWMutex
-	messages       []client.IncomingMessage // ring buffer
-	joinedRooms    map[string]bool          // rooms to rejoin on reconnect
-	keys           *keystore.Keys
-	version        string
-	latestVersion  string // fetched async on startup
+	addr              string
+	relay             string
+	agentName         string
+	keyPath           string
+	apiToken          string
+	client            *client.Client
+	mu                sync.RWMutex
+	messages          []client.IncomingMessage // ring buffer
+	joinedRooms       map[string]bool          // rooms to rejoin on reconnect
+	keys              *keystore.Keys
+	version           string
+	latestVersion     string    // cached latest release tag
+	latestVersionAt   time.Time // when latestVersion was last fetched
 }
 
 // Config holds daemon configuration.
@@ -99,8 +100,8 @@ func (d *Daemon) Start() error {
 	// Reconnect loop — watches for disconnection and reconnects with backoff
 	go d.reconnectLoop()
 
-	// Check for updates periodically (non-blocking)
-	go d.versionCheckLoop()
+	// Warm the version cache on startup (non-blocking)
+	go d.checkLatestVersion()
 
 	// Write PID file
 	pidPath := filepath.Join(filepath.Dir(d.keyPath), "daemon.pid")
@@ -132,16 +133,6 @@ func (d *Daemon) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// versionCheckLoop checks for updates on startup and every 6 hours.
-func (d *Daemon) versionCheckLoop() {
-	d.checkLatestVersion()
-	ticker := time.NewTicker(6 * time.Hour)
-	defer ticker.Stop()
-	for range ticker.C {
-		d.checkLatestVersion()
-	}
-}
-
 // checkLatestVersion fetches the latest release from GitHub and caches it.
 func (d *Daemon) checkLatestVersion() {
 	c := &http.Client{Timeout: 10 * time.Second}
@@ -161,6 +152,7 @@ func (d *Daemon) checkLatestVersion() {
 	latest := strings.TrimPrefix(rel.TagName, "v")
 	d.mu.Lock()
 	d.latestVersion = latest
+	d.latestVersionAt = time.Now()
 	d.mu.Unlock()
 	if latest != "" && latest != strings.TrimPrefix(d.version, "v") && d.version != "dev" {
 		log.Printf("⚠ update available: %s → %s (run: agentnet version)", d.version, latest)
@@ -246,7 +238,13 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, r *http.Request) {
 	d.mu.RLock()
 	connected := d.client != nil
 	latest := d.latestVersion
+	cacheAge := time.Since(d.latestVersionAt)
 	d.mu.RUnlock()
+
+	// Refresh version cache if expired (6h) or never fetched
+	if cacheAge > 6*time.Hour {
+		go d.checkLatestVersion()
+	}
 
 	current := strings.TrimPrefix(d.version, "v")
 	updateAvailable := latest != "" && latest != current && d.version != "dev"
